@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { getLiveSessionById, IAgentLifecycleService, IEventBus } from '@moonshot-ai/agent-core-v2';
+import { TurnEnded } from '@moonshot-ai/agent-core-v2/agent/loop/turnOps';
 import { ToolUpdated } from '@moonshot-ai/agent-core-v2/agent/toolExecutor/toolExecutorEvents';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -106,6 +107,120 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
     expect(usageUpdate?.size).toBe(8192);
     expect(usageUpdate?.used).toBeGreaterThan(0);
     expect(usageUpdate?.cost).toBeUndefined();
+  }, 30_000);
+
+  it('rejects non-auth turn failures instead of resolving them as end_turn', async () => {
+    const c = await boot({ terminal: true });
+    scripted!.mockNextResponse({
+      type: 'function',
+      id: 'call_failure',
+      name: 'Bash',
+      arguments: '{"command":"echo failure"}',
+    });
+    c.onRequest('session/request_permission', () => ({
+      outcome: { outcome: 'selected', optionId: 'approve_once' },
+    }));
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'fail this turn' }],
+    });
+    const toolCall = await c.waitForSessionUpdate('tool_call', 10_000);
+    const wireId = (toolCall.params as { update?: { toolCallId?: string } }).update?.toolCallId;
+    const turnId = Number(wireId?.split(':')[0]);
+    const session = getLiveSessionById(c.server.core.accessor, created.sessionId);
+    const agentHandle = session?.accessor.get(IAgentLifecycleService).handleOf('main');
+    const bus = agentHandle?.accessor.get(IEventBus);
+    expect(bus).toBeDefined();
+    bus!.publish(new TurnEnded({
+      agentId: 'main',
+      turnId,
+      reason: 'failed',
+      error: { code: 'provider.api_error', message: 'provider failed', retryable: false },
+    }));
+    const rejection = await promptPromise.catch((error: unknown) => error);
+    expect(rejection).toBeDefined();
+    expect(JSON.parse(String(rejection).replace(/^Error: /, ''))).toEqual({
+      code: -32603,
+      message: 'Internal error: Turn failed',
+    });
+  }, 30_000);
+
+  it('keeps provider.filtered failures as refusal instead of JSON-RPC errors', async () => {
+    const c = await boot({ terminal: true });
+    scripted!.mockNextResponse({
+      type: 'function',
+      id: 'call_filtered',
+      name: 'Bash',
+      arguments: '{"command":"echo filtered"}',
+    });
+    c.onRequest('session/request_permission', () => ({
+      outcome: { outcome: 'selected', optionId: 'approve_once' },
+    }));
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'filter this turn' }],
+    });
+    const toolCall = await c.waitForSessionUpdate('tool_call', 10_000);
+    const wireId = (toolCall.params as { update?: { toolCallId?: string } }).update?.toolCallId;
+    const turnId = Number(wireId?.split(':')[0]);
+    const session = getLiveSessionById(c.server.core.accessor, created.sessionId);
+    const agentHandle = session?.accessor.get(IAgentLifecycleService).handleOf('main');
+    const bus = agentHandle?.accessor.get(IEventBus);
+    expect(bus).toBeDefined();
+    bus!.publish(new TurnEnded({
+      agentId: 'main',
+      turnId,
+      reason: 'failed',
+      error: { code: 'provider.filtered', message: 'provider filtered', retryable: false },
+    }));
+    const result = (await promptPromise) as { stopReason: string };
+    expect(result.stopReason).toBe('refusal');
+  }, 30_000);
+
+  it('preserves auth_required for authentication failures on turn.ended', async () => {
+    const c = await boot({ terminal: true });
+    scripted!.mockNextResponse({
+      type: 'function',
+      id: 'call_auth',
+      name: 'Bash',
+      arguments: '{"command":"echo auth"}',
+    });
+    c.onRequest('session/request_permission', () => ({
+      outcome: { outcome: 'selected', optionId: 'approve_once' },
+    }));
+    const created = (await c.send('session/new', { cwd: homeDir, mcpServers: [] })) as {
+      sessionId: string;
+    };
+    await c.waitForSessionUpdate('available_commands_update', 10_000);
+    const promptPromise = c.send('session/prompt', {
+      sessionId: created.sessionId,
+      prompt: [{ type: 'text', text: 'fail authentication' }],
+    });
+    const toolCall = await c.waitForSessionUpdate('tool_call', 10_000);
+    const wireId = (toolCall.params as { update?: { toolCallId?: string } }).update?.toolCallId;
+    const turnId = Number(wireId?.split(':')[0]);
+    const session = getLiveSessionById(c.server.core.accessor, created.sessionId);
+    const agentHandle = session?.accessor.get(IAgentLifecycleService).handleOf('main');
+    const bus = agentHandle?.accessor.get(IEventBus);
+    expect(bus).toBeDefined();
+    bus!.publish(new TurnEnded({
+      agentId: 'main',
+      turnId,
+      reason: 'failed',
+      error: { code: 'provider.auth_error', message: 'Provider returned 401', retryable: false },
+    }));
+    const rejection = await promptPromise.catch((error: unknown) => error);
+    expect(rejection).toBeDefined();
+    expect(JSON.parse(String(rejection).replace(/^Error: /, ''))).toMatchObject({ code: -32000 });
+    expect(String(rejection)).toContain('Provider returned 401');
   }, 30_000);
 
   it('runs a tool call and bridges the approval request to the client', async () => {

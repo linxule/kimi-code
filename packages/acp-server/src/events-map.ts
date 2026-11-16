@@ -48,10 +48,8 @@ export function assistantDeltaToSessionUpdate(
  *
  * `completed` → `end_turn`: the model finished a clean turn.
  * `cancelled` → `cancelled`: the client/agent cancelled mid-turn.
- * `failed`    → `end_turn` (with the out-of-band `error` logged by the
- *   caller). ACP's `StopReason` has no dedicated `failed` variant in this
- *   protocol version, and the spec discourages signaling errors through
- *   `stopReason` (errors belong on the JSON-RPC error channel).
+ * Other `failed` outcomes are rejected by the session over the JSON-RPC error
+ * channel rather than being reported as successful turns.
  * `failed` + `provider.filtered` → `refusal`: the provider's safety policy
  *   blocked the response.
  * `blocked`   → `refusal`: a prompt hook blocked the turn before the model

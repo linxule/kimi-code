@@ -951,6 +951,10 @@ export class AcpSession {
         driver.reject(RequestError.authRequired(undefined, error?.message));
         return;
       }
+      if (event.reason === 'failed' && error?.code !== 'provider.filtered') {
+        driver.reject(RequestError.internalError(undefined, 'Turn failed'));
+        return;
+      }
       driver.resolve({ stopReason: turnEndReasonToStopReason(event.reason, error) });
     });
     void this.emitUsageUpdate();
